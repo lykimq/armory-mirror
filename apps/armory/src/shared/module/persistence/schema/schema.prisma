@@ -1,0 +1,217 @@
+generator client {
+  provider = "prisma-client-js"
+  // Output into a separate subdirectory so multiple schemas can be used in a
+  // monorepo.
+  //
+  // Reference: https://github.com/nrwl/nx-recipes/tree/main/nestjs-prisma
+  output   = "../../../../../../../node_modules/@prisma/client/armory"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("APP_DATABASE_URL")
+}
+
+model Application {
+  id          String   @id @default(uuid()) @db.VarChar(255)
+  adminApiKey String?  @map("admin_api_key")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("application")
+}
+
+model Client {
+  id              String   @id @default(uuid()) @db.VarChar(255)
+  name            String
+  clientSecret    String   @map("client_secret")
+  dataSecret      String?  @map("data_secret")
+  enginePublicKey Json     @map("engine_public_key")
+  entityPublicKey Json?    @map("entity_public_key") @ignore // deprecated 15-08-2024 @mattschoch, use dataStoreKeys instead
+  policyPublicKey Json?    @map("policy_public_key") @ignore // deprecated 15-08-2024 @mattschoch, use dataStoreKeys instead
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  dataStoreKeys DataStoreKey[]
+
+  @@map("client")
+}
+
+model DataStoreKey {
+  id        String    @id @default(uuid()) @db.VarChar(255)
+  clientId  String    @map("client_id")
+  storeType String    @map("store_type") // entity or policy
+  publicKey Json      @map("public_key") // JWK of the public key
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@map("data_store_key")
+}
+
+model Engine {
+  id           String   @id @default(uuid()) @db.VarChar(255)
+  clientId     String   @map("client_id")
+  clientSecret String   @map("client_secret")
+  publicKey    Json     @map("pub_key")
+  url          String
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("engine")
+}
+
+//
+// Policy Engine Module
+//
+
+enum AuthorizationRequestStatus {
+  CREATED
+  FAILED
+  CANCELED
+  PROCESSING
+  APPROVING
+  PERMITTED
+  FORBIDDEN
+}
+
+model AuthorizationRequest {
+  id             String                     @id @default(uuid()) @db.VarChar(255)
+  clientId       String                     @map("client_id")
+  status         AuthorizationRequestStatus @default(CREATED)
+  // Duplicate the action to pick the `request` schema at the application-level.
+  // After the decoding, the model's action is not used in the domain type.
+  action         String
+  request        Json
+  idempotencyKey String?                    @unique @map("idempotency_key")
+  authnSig       String                     @map("authn_sig")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  evaluationLog EvaluationLog[]
+  approvals     AuthorizationRequestApproval[]
+  metadata      Json?
+  errors        AuthorizationRequestError[]
+
+  @@map("authorization_request")
+}
+
+model AuthorizationRequestApproval {
+  id        String   @id @default(uuid()) @db.VarChar(255)
+  requestId String   @map("request_id")
+  sig       String
+  error     Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  request AuthorizationRequest @relation(fields: [requestId], references: [id])
+
+  @@map("authorization_request_approval")
+}
+
+model AuthorizationRequestError {
+  id        String @id @default(uuid()) @db.VarChar(255)
+  clientId  String @map("client_id")
+  requestId String @map("request_id")
+  name      String
+  message   String
+
+  request AuthorizationRequest @relation(fields: [requestId], references: [id])
+
+  @@map("authorization_request_error")
+}
+
+model EvaluationLog {
+  id                       String   @id @default(uuid()) @db.VarChar(255)
+  clientId                 String   @map("client_id")
+  requestId                String   @map("request_id")
+  transactionRequestIntent Json?    @map("transaction_request_intent")
+  decision                 String
+  signature                String?
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  approvals ApprovalRequirement[]
+
+  request AuthorizationRequest @relation(fields: [requestId], references: [id])
+
+  @@map("evaluation_log")
+}
+
+model ApprovalRequirement {
+  id           String @id @default(uuid()) @db.VarChar(255)
+  evaluationId String @map("evaluation_id")
+
+  approvalCount      Int      @map("approval_count")
+  approvalEntityType String   @map("approval_entity_type")
+  entityIds          String[] @map("entity_ids")
+  countPrincipal     Boolean  @map("count_principal")
+  isSatisfied        Boolean  @map("is_satisfied")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  evaluationLog EvaluationLog @relation(fields: [evaluationId], references: [id])
+
+  @@map("approval_requirement")
+}
+
+//
+// Transfer Tracking Module
+//
+
+model ApprovedTransfer {
+  id          String   @id @default(uuid()) @db.VarChar(255)
+  resourceId  String   @map("resource_id")
+  clientId    String   @map("client_id")
+  requestId   String   @map("request_id")
+  chainId     Int      @map("chain_id")
+  from        String
+  to          String
+  token       String
+  amount      String
+  rates       Json
+  initiatedBy String   @map("initiated_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("approved_transfer")
+}
+
+//
+// Data Feed Module
+//
+
+model Feed {
+  id        String   @id @default(uuid()) @db.VarChar(255)
+  clientId  String   @map("client_id")
+  requestId String   @map("request_id")
+  source    String
+  sig       String?
+  alg       String?
+  pubKey    String?  @map("pub_key")
+  data      Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("feed")
+}
+
+//
+// Data Store
+//
+
+model EntityDataStore {
+  id        String   @id @default(uuid()) @db.VarChar(255)
+  clientId  String   @map("client_id")
+  data      Json
+  version   Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("entity_data_store")
+}
+
+model PolicyDataStore {
+  id        String   @id @default(uuid()) @db.VarChar(255)
+  clientId  String   @map("client_id")
+  data      Json
+  version   Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("policy_data_store")
+}

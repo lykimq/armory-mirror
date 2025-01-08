@@ -1,0 +1,179 @@
+name: 'narval'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - '5432:5432'
+    networks:
+      - armory_stack
+    volumes:
+      - ./.data/psql:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: 'bitnami/redis:7.0'
+    ports:
+      - '6379:6379'
+    expose:
+      - '6379'
+    networks:
+      - armory_stack
+    environment:
+      ALLOW_EMPTY_PASSWORD: 'true'
+    volumes:
+      - ./.data/redis:/data
+
+  jaeger:
+    image: 'jaegertracing/all-in-one'
+    ports:
+      - '16686:16686' # Web UI
+      - '14250:14250' # gRPC
+    networks:
+      - armory_stack
+
+  otel_collector:
+    image: 'otel/opentelemetry-collector-contrib'
+    command: ['--config=/etc/otel-collector-config.yaml']
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - '4318:4318' # HTTP
+      - '4317:4317' # gRPC
+    networks:
+      - armory_stack
+    depends_on:
+      - jaeger
+
+  armory:
+    image: armory/local:latest
+    build:
+      context: ./
+      dockerfile: local.dockerfile
+    container_name: armory
+    command: ['/bin/bash', '-c', 'make armory/db/migrate/deploy && make armory/start/dev']
+    ports:
+      - '3005:3010'
+    networks:
+      - armory_stack
+    environment:
+      - NODE_ENV=development
+      - PORT=3010
+      - APP_UID=local-dev-armory-instance-1
+      - ADMIN_API_KEY=171c50ec62122b8c08362dcf9dce9b016ed615cfc7b90d4bc3fe5b223d967fb2 # armory-admin-api-key
+      - APP_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/armory?schema=public
+      - APP_DATABASE_USERNAME=postgres
+      - APP_DATABASE_PASSWORD=postgres
+      - APP_DATABASE_HOST=host.docker.internal
+      - APP_DATABASE_PORT=5432
+      - APP_DATABASE_NAME=armory
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MANAGED_DATASTORE_BASE_URL=http://armory:3010/v1/data
+      - POLICY_ENGINE_URLS=http://policy_engine:3010
+      - POLICY_ENGINE_ADMIN_API_KEYS=engine-admin-api-key
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  policy_engine:
+    image: armory/local:latest
+    build:
+      context: ./
+      dockerfile: local.dockerfile
+    container_name: policy-engine
+    command: ['/bin/bash', '-c', 'make policy-engine/db/migrate/deploy && make policy-engine/start/dev']
+    ports:
+      - '3020:3010'
+    networks:
+      - armory_stack
+    environment:
+      - NODE_ENV=development
+      - PORT=3010
+      - ADMIN_API_KEY=dde1fba05d6b0b1a40f2cd9f480f6dcc37a6980bcff3db54377a46b056dc472c # engine-admin-api-key
+      - APP_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/engine?schema=public
+      - APP_DATABASE_USERNAME=postgres
+      - APP_DATABASE_PASSWORD=postgres
+      - APP_DATABASE_HOST=host.docker.internal
+      - APP_DATABASE_PORT=5432
+      - APP_DATABASE_NAME=engine
+      - APP_UID=local-dev-engine-instance-1
+      - MASTER_PASSWORD=unsafe-local-dev-master-password
+      - RESOURCE_PATH=./apps/policy-engine/src/resource
+      - KEYRING_TYPE=raw
+      - SIGNING_PROTOCOL=simple
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+    depends_on:
+      postgres:
+        condition: service_healthy
+      armory:
+        condition: service_started
+
+  vault:
+    image: armory/local:latest
+    build:
+      context: ./
+      dockerfile: local.dockerfile
+    container_name: vault
+    command: ['/bin/bash', '-c', 'make vault/db/migrate/deploy && make vault/start/dev']
+    ports:
+      - '3011:3010'
+    networks:
+      - armory_stack
+    environment:
+      - NODE_ENV=development
+      - PORT=3010
+      - ADMIN_API_KEY=d4a6b4c1cb71dbdb68a1dd429ad737369f74b9e264b9dfa639258753987caaad # vault-admin-api-key
+      - APP_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vault?schema=public
+      - APP_DATABASE_USERNAME=postgres
+      - APP_DATABASE_PASSWORD=postgres
+      - APP_DATABASE_HOST=host.docker.internal
+      - APP_DATABASE_PORT=5432
+      - APP_DATABASE_NAME=vault
+      - APP_UID=local-dev-vault-instance-1
+      - MASTER_PASSWORD=unsafe-local-dev-master-password
+      - KEYRING_TYPE=raw
+      - BASE_URL=http://localhost:3011
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  devtool:
+    image: armory/local:latest
+    build:
+      context: ./
+      dockerfile: local.dockerfile
+    container_name: devtool
+    command: ['/bin/bash', '-c', 'make devtool/start/dev']
+    ports:
+      - '4200:4200'
+    networks:
+      - armory_stack
+    volumes:
+      - ./packages:/app/packages
+      - ./apps:/app/apps
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  armory_stack:
