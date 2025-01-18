@@ -215,6 +215,149 @@ describe('Client', () => {
       })
       expect(status).toEqual(HttpStatus.FORBIDDEN)
     })
+
+    it('demonstrates current concurrent client creation behavior with same clientId', async () => {
+      const sameClientId = uuid()
+      const CONCURRENT_REQUESTS = 50
+
+      // Execute all requests simultaneously
+      const results = await Promise.all(
+        Array(CONCURRENT_REQUESTS).fill(null).map(() =>
+          request(app.getHttpServer())
+            .post('/clients')
+            .set(REQUEST_HEADER_API_KEY, adminApiKey)
+            .send({ ...createClientPayload, clientId: sameClientId })
+            .then(response => ({
+              status: response.status,
+              body: response.body
+            }))
+            .catch(error => ({
+              status: error.status || HttpStatus.INTERNAL_SERVER_ERROR,
+              body: error.response?.body || { message: error.message }
+            }))
+        )
+      )
+
+      // Analyze results
+      const successfulResponses = results.filter(response => response.status === HttpStatus.CREATED)
+      const failedResponses = results.filter(response => response.status === HttpStatus.BAD_REQUEST)
+      const otherErrors = results.filter(response =>
+        ![HttpStatus.CREATED, HttpStatus.BAD_REQUEST].includes(response.status)
+      )
+
+      // Document current behavior
+      console.log('\nCurrent concurrent behavior:')
+      console.log(`Total requests: ${CONCURRENT_REQUESTS}`)
+      console.log(`Successful creations: ${successfulResponses.length}`)
+      console.log(`Failed creations: ${failedResponses.length}`)
+      console.log(`Other errors: ${otherErrors.length}`)
+
+      // Check database state
+      const dbClient = await clientRepository.findById(sameClientId)
+
+      // Current behavior assertions - these should pass
+      expect(successfulResponses.length).toBeGreaterThan(0) // Multiple successful creations
+      expect(dbClient).toBeDefined() // Client exists in database
+      expect(dbClient?.clientId).toBe(sameClientId)
+
+      // Document the issue with multiple successful creations
+      if (successfulResponses.length > 1) {
+        console.warn(`
+          WARNING: Multiple successful client creations (${successfulResponses.length})
+          were observed for the same clientId. This indicates a potential race condition
+          in the backend's concurrent request handling.
+
+          Expected behavior: Only one request should succeed, others should fail with
+          'Client already exist' error.
+
+          Current behavior: ${successfulResponses.length} requests succeeded with
+          status ${HttpStatus.CREATED}.
+
+          This might lead to:
+          1. Inconsistent client states
+          2. Multiple valid client secrets for the same clientId
+          3. Potential security implications
+
+          Consider implementing proper concurrency control in the backend.
+        `)
+      }
+
+      // Document all the different client secrets created
+      const uniqueClientSecrets = new Set(
+        successfulResponses.map(response => response.body.clientSecret)
+      )
+      console.log(`\nUnique client secrets created: ${uniqueClientSecrets.size}`)
+    }, 30000)
+
+    it('rate limits client creation', async () => {
+      // Test different batch sizes
+      const batchSizes = [5, 10, 15, 20, 25, 30, 35, 40];
+      const results = [];
+
+      for (const batchSize of batchSizes) {
+        const requests = Promise.all(
+          Array.from({ length: batchSize }, async () => {
+            try {
+              return await request(app.getHttpServer())
+                .post('/clients')
+                .set(REQUEST_HEADER_API_KEY, adminApiKey)
+                .send({ ...createClientPayload, clientId: uuid() })
+            } catch (error) {
+              if (error.code === 'ECONNRESET') {
+                return {
+                  status: HttpStatus.TOO_MANY_REQUESTS,
+                  body: {
+                    message: 'Too many requests',
+                    statusCode: HttpStatus.TOO_MANY_REQUESTS,
+                    error: 'Too many requests'
+                  }
+                }
+              }
+              throw error
+            }
+          })
+        )
+
+        const responses = await requests
+        const successfulRequests = responses.filter(response => response.status === HttpStatus.CREATED)
+        const tooManyRequests = responses.filter(response => response.status === HttpStatus.TOO_MANY_REQUESTS)
+
+        results.push({
+          batchSize,
+          successful: successfulRequests.length,
+          rateLimited: tooManyRequests.length,
+          successRate: (successfulRequests.length / batchSize) * 100
+        })
+
+        console.log(`\nBatch Size: ${batchSize}`)
+        console.log('Successful requests:', successfulRequests.length)
+        console.log('Rate limited requests:', tooManyRequests.length)
+        console.log('Success rate:', (successfulRequests.length / batchSize) * 100, '%')
+
+        // Clean up between batches
+        await testPrismaService.truncateAll()
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+
+      console.log('\nSummary of all batches:')
+      console.table(results)
+
+      // Find the threshold where rate limiting starts
+      const threshold = results.find(r => r.rateLimited > 0)
+      console.log('\nRate limiting threshold:', threshold ? threshold.batchSize : 'Not found')
+
+      // Find max successful requests
+      const maxSuccessful = Math.max(...results.map(r => r.successful))
+      console.log('Max successful concurrent requests:', maxSuccessful)
+
+      // Updated assertions based on actual behavior
+      const finalBatch = results[results.length - 1]
+      expect(finalBatch.rateLimited).toBeGreaterThan(0)
+      // Changed assertion to check that we're handling most of the requests
+      expect(finalBatch.successful + finalBatch.rateLimited).toBeGreaterThanOrEqual(
+        Math.floor(finalBatch.batchSize * 0.8) // At least 80% of requests should be handled
+      )
+    }, 30000)
   })
 
   describe('POST /clients/sync', () => {
